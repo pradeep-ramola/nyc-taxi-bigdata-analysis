@@ -1,0 +1,11 @@
+# Ignore Hadoop data folders
+datanode1/
+datanode2/
+namenode/
+
+# Ignore logs or temporary files if any
+*.log
+*.tmp
+
+start-hdfs.sh
+init-datanode.sh
