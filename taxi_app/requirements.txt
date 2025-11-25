@@ -3,3 +3,7 @@ torch
 numpy
 streamlit
 requests
+pyspark
+pandas
+plotly
+pyarrow

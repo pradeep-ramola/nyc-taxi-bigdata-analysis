@@ -1,0 +1,1 @@
+{"class":"org.apache.spark.ml.feature.StringIndexerModel","timestamp":1763958650026,"sparkVersion":"3.5.1","uid":"StringIndexer_378c4a07fccf","paramMap":{"inputCol":"RatecodeID","outputCol":"RatecodeID_idx","handleInvalid":"keep"},"defaultParamMap":{"outputCol":"StringIndexer_378c4a07fccf__output","handleInvalid":"error","stringOrderType":"frequencyDesc"}}

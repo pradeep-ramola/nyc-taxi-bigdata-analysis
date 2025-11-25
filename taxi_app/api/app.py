@@ -1,49 +1,204 @@
+# api/app.py
+
 from flask import Flask, request, jsonify
-import torch
-import torch.nn as nn
-import numpy as np
-from utils import load_model, preprocess_input
+import pandas as pd
+
+from pyspark.sql import SparkSession
+from pyspark.ml import PipelineModel
+from pyspark.ml.tuning import CrossValidatorModel, TrainValidationSplitModel
+
 
 app = Flask(__name__)
+ 
+spark = (
+    SparkSession.builder
+    .appName("TaxiModelsAPI")
+    .master("local[*]")  # local mode
+    .getOrCreate()
+)
 
-# Load three PyTorch models
-model_highlow = load_model("models/high_low_fare_prediction.pt")
-model_tip = load_model("models/tip_prediction.pt")
-model_payment = load_model("models/payment_prediction.pt")
+ 
+def load_spark_model(path: str):
+    """
+    Tries to load a saved Spark model directory as:
+    - CrossValidatorModel
+    - TrainValidationSplitModel
+    - PipelineModel
+    """
+    for cls in (CrossValidatorModel, TrainValidationSplitModel, PipelineModel):
+        try:
+            return cls.load(path)
+        except Exception:
+            continue
+    raise ValueError(f"Could not load Spark model at {path}")
 
-@app.route("/")
+
+MODEL_BASE = "models"
+
+ 
+model_highlow = load_spark_model(f"{MODEL_BASE}/high_low_fare_prediction")
+
+ 
+model_tip = load_spark_model(f"{MODEL_BASE}/tip_prediction")
+ 
+model_payment = load_spark_model(f"{MODEL_BASE}/payment_prediction")
+
+
+ 
+REQUIRED_FEATURES = [
+    # Categorical
+    "VendorID",
+    "RatecodeID",
+    "PULocationID",
+    "DOLocationID",
+    "pickup_hour",
+    "pickup_day_of_week",
+
+     
+    "trip_distance",
+    "trip_duration_min",
+    "passenger_count",
+    "fare_amount",
+    "tolls_amount",
+    "improvement_surcharge",
+    "congestion_surcharge",
+    "Airport_fee",
+    "cbd_congestion_fee",
+
+    # Numerical used by payment model
+    "extra",
+    "mta_tax",
+]
+
+
+def validate_payload(payload: dict):
+    """
+    Ensures all required fields exist in the request JSON.
+    Returns (ok: bool, error_message: str | None)
+    """
+    missing = [col for col in REQUIRED_FEATURES if col not in payload]
+    if missing:
+        return False, f"Missing required field(s): {', '.join(missing)}"
+    return True, None
+
+
+def json_to_spark_df(payload: dict):
+    """
+    Convert JSON dict into Spark DataFrame with a single row.
+    """
+    pdf = pd.DataFrame([payload])
+    return spark.createDataFrame(pdf)
+
+
+ 
+@app.route("/", methods=["GET"])
 def index():
-    return "Taxi ML API is running."
+    return jsonify({
+        "status": "ok",
+        "message": "Taxi Spark ML API is running.",
+        "models": ["highlow", "tip", "payment"]
+    })
 
-# ------- HIGH VS LOW FARE -------
+
+ 
 @app.route("/predict/highlow", methods=["POST"])
 def predict_highlow():
-    data = request.json
-    x = preprocess_input(data)
-    with torch.no_grad():
-        pred = model_highlow(x)
-        label = "High Fare" if pred.argmax() == 1 else "Low Fare"
-    return jsonify({"prediction": label})
+    try:
+        payload = request.get_json(force=True)
 
-# ------- TIP PREDICTION -------
+        ok, err = validate_payload(payload)
+        if not ok:
+            return jsonify({"error": err}), 400
+
+        sdf = json_to_spark_df(payload)
+        preds = model_highlow.transform(sdf)
+
+         
+        row = preds.select("prediction").first()
+        if row is None:
+            return jsonify({"error": "No prediction generated."}), 500
+
+        pred_value = float(row["prediction"])
+
+         
+        label = "High Fare" if pred_value == 1.0 else "Low Fare"
+
+        return jsonify({
+            "prediction": label,
+            "prediction_index": pred_value
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": f"Internal error in /predict/highlow: {str(e)}"
+        }), 500
+
+
+ 
 @app.route("/predict/tip", methods=["POST"])
 def predict_tip():
-    data = request.json
-    x = preprocess_input(data)
-    with torch.no_grad():
-        pred = model_tip(x).item()
-    return jsonify({"predicted_tip_amount": round(pred, 2)})
+    try:
+        payload = request.get_json(force=True)
 
-# ------- PAYMENT TYPE PREDICTION -------
+        ok, err = validate_payload(payload)
+        if not ok:
+            return jsonify({"error": err}), 400
+
+        sdf = json_to_spark_df(payload)
+        preds = model_tip.transform(sdf)
+
+        row = preds.select("prediction").first()
+        if row is None:
+            return jsonify({"error": "No prediction generated."}), 500
+
+        tip_amount = float(row["prediction"])
+        return jsonify({"predicted_tip_amount": round(tip_amount, 2)})
+
+    except Exception as e:
+        return jsonify({
+            "error": f"Internal error in /predict/tip: {str(e)}"
+        }), 500
+
+
+ 
 @app.route("/predict/payment", methods=["POST"])
 def predict_payment():
-    data = request.json
-    x = preprocess_input(data)
-    with torch.no_grad():
-        pred = model_payment(x).argmax().item()
+    try:
+        payload = request.get_json(force=True)
 
-    payment_map = {0: "Cash", 1: "Credit Card", 2: "No Charge", 3: "Dispute"}
-    return jsonify({"predicted_payment_type": payment_map.get(pred, "Unknown")})
+        ok, err = validate_payload(payload)
+        if not ok:
+            return jsonify({"error": err}), 400
+
+        sdf = json_to_spark_df(payload)
+        preds = model_payment.transform(sdf)
+
+        row = preds.select("prediction").first()
+        if row is None:
+            return jsonify({"error": "No prediction generated."}), 500
+
+        pred_idx = int(row["prediction"])
+
+         
+        payment_map = {
+            0: "Credit Card",
+            1: "Cash",
+            2: "No Charge",
+            3: "Dispute",
+            4: "Unknown/Other"
+        }
+
+        return jsonify({
+            "predicted_payment_type": payment_map.get(pred_idx, f"class_{pred_idx}"),
+            "prediction_index": pred_idx
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": f"Internal error in /predict/payment: {str(e)}"
+        }), 500
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    
+    app.run(host="0.0.0.0", port=5001, debug=True)
